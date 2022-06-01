@@ -7,7 +7,7 @@ import hmac
 import json
 from hashlib import sha256 as sha256
 from urllib.request import Request, urlopen
-
+import requests
 
 pid = 'YOUR_PID_GOES_HERE'
 secret_key = b'YOUR_SECRETKEY_GOES_HERE'
@@ -34,7 +34,8 @@ def result(task_id):
     print(parameter)
     signature = base64.b64encode(
         hmac.new(secret_key, parameter.encode('utf-8'), digestmod=sha256).digest())
-    return send(query_body, signature, now_date)
+    return send(params, signature, now_date)
+
 
 
 def send(querystring, signature, time_stamp):
@@ -46,17 +47,20 @@ def send(querystring, signature, time_stamp):
         "Host": endpoint_host,
         "Connection": "keep-alive"
     }
+    req = requests.post(endpoint_url,headers=headers,params=querystring)
+    return req.json()
 
-    # querystring = parse.urlencode(params)
-    req = Request(endpoint_url, querystring.encode(
-        'utf-8'), headers=headers, method='POST')
-    return urlopen(req).read().decode()
 
+
+class A:
+    def __init__(self,dic):
+        for k,v in dic.items:
+            setattr(self,k,v)
 
 if __name__ == '__main__':
     task_id = "THE_TASK_ID_FROM_SUBMIT_API"
 
     response = result(task_id)
-    print(response)
+    obj = A(response)
 
 
