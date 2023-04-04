@@ -30,7 +30,7 @@ def translate(source, target, sentence):
     parameter += endpoint_host + '\n'
     parameter += endpoint_path + '\n'
     for key in sorted(params.keys()):
-        parameter += key + '=' + parse.quote(params.get(key)) + '&'
+        parameter += key + '=' + parse.quote(params.get(key), safe='') + '&'
     parameter = parameter[:-1]
     print(parameter)
     signature = base64.b64encode(
