@@ -5,7 +5,7 @@
     python3 -m pip install "websockets>=12,<18"
 
 方式一：通过执行参数传入凭证（最高优先级）
-    python3 tts_websocket_demo.py \
+    python3 speech_synthesis.py \
       --app-id your_app_id \
       --secret-key 'your_secret_key' \
       --text '您好，这是一个 WebSocket 流式语音合成示例。' \
@@ -16,16 +16,16 @@
 方式二：通过环境变量传入凭证
     export ILIVEDATA_APP_ID='your_app_id'
     export ILIVEDATA_SECRET_KEY='your_secret_key'
-    python3 tts_websocket_demo.py --text '您好，这是一个合成示例。'
+    python3 speech_synthesis.py --text '您好，这是一个合成示例。'
 
 方式三：修改下方 INITIAL_APP_ID 和 INITIAL_SECRET_KEY 初始化值
     INITIAL_APP_ID = 0  # 将 0 替换为实际的 your_app_id（整数）
     INITIAL_SECRET_KEY = "your_secret_key"
-    设置后运行：python3 tts_websocket_demo.py --text '您好，这是一个合成示例。'
+    设置后运行：python3 speech_synthesis.py --text '您好，这是一个合成示例。'
 
 凭证优先级：执行参数 > 环境变量 > 脚本内初始化值。
 
-运行 python3 tts_websocket_demo.py --help 可查看全部参数。
+运行 python3 speech_synthesis.py --help 可查看全部参数。
 """
 
 from __future__ import annotations
