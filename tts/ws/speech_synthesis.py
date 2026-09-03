@@ -38,11 +38,12 @@ import hmac
 import json
 import os
 import ssl
+import struct
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -57,6 +58,97 @@ INITIAL_SECRET_KEY = ""
 
 class TtsApiError(RuntimeError):
     """服务端返回的可读错误。"""
+
+
+class AudioFileWriter:
+    """按请求格式写入流式音频；WAV 分片会合并为一个 RIFF 容器。"""
+
+    def __init__(self, output: BinaryIO, audio_format: str):
+        self.output = output
+        self.audio_format = audio_format
+        self.wav_format_chunk: bytes | None = None
+        self.wav_data_size = 0
+        self.wav_data_size_offset: int | None = None
+
+    def write(self, chunk: bytes) -> None:
+        if self.audio_format != "wav":
+            # PCM 是裸采样数据，MP3 是可连续解码的 MPEG 音频帧，均可顺序追加。
+            self.output.write(chunk)
+            return
+
+        format_chunk, data_chunks = self._parse_wav(chunk)
+        if self.wav_format_chunk is None:
+            self._write_wav_header(format_chunk)
+        elif format_chunk != self.wav_format_chunk:
+            raise TtsApiError("WAV chunks have inconsistent fmt parameters")
+
+        for data in data_chunks:
+            self.output.write(data)
+            self.wav_data_size += len(data)
+
+    def finalize(self) -> None:
+        if self.audio_format != "wav":
+            return
+        if self.wav_format_chunk is None or self.wav_data_size_offset is None:
+            raise TtsApiError("No valid WAV audio chunk was received")
+        if self.wav_data_size > 0xFFFFFFFF:
+            raise TtsApiError("WAV audio data exceeds the RIFF 4 GiB size limit")
+
+        if self.wav_data_size % 2:
+            self.output.write(b"\x00")
+        file_size = self.output.tell()
+        riff_size = file_size - 8
+        if riff_size > 0xFFFFFFFF:
+            raise TtsApiError("WAV file exceeds the RIFF 4 GiB size limit")
+
+        self.output.seek(4)
+        self.output.write(struct.pack("<I", riff_size))
+        self.output.seek(self.wav_data_size_offset)
+        self.output.write(struct.pack("<I", self.wav_data_size))
+        self.output.seek(file_size)
+
+    def _write_wav_header(self, format_chunk: bytes) -> None:
+        self.wav_format_chunk = format_chunk
+        self.output.write(b"RIFF\x00\x00\x00\x00WAVE")
+        self.output.write(b"fmt ")
+        self.output.write(struct.pack("<I", len(format_chunk)))
+        self.output.write(format_chunk)
+        if len(format_chunk) % 2:
+            self.output.write(b"\x00")
+        self.output.write(b"data")
+        self.wav_data_size_offset = self.output.tell()
+        self.output.write(b"\x00\x00\x00\x00")
+
+    @staticmethod
+    def _parse_wav(chunk: bytes) -> tuple[bytes, list[bytes]]:
+        if len(chunk) < 12 or chunk[:4] != b"RIFF" or chunk[8:12] != b"WAVE":
+            raise TtsApiError("WAV audio chunk is not a RIFF/WAVE file")
+
+        riff_end = struct.unpack_from("<I", chunk, 4)[0] + 8
+        if riff_end > len(chunk):
+            raise TtsApiError("WAV audio chunk is truncated")
+
+        format_chunk: bytes | None = None
+        data_chunks: list[bytes] = []
+        offset = 12
+        while offset + 8 <= riff_end:
+            chunk_id = chunk[offset:offset + 4]
+            chunk_size = struct.unpack_from("<I", chunk, offset + 4)[0]
+            data_start = offset + 8
+            data_end = data_start + chunk_size
+            if data_end > riff_end:
+                raise TtsApiError("WAV subchunk is truncated")
+            if chunk_id == b"fmt " and format_chunk is None:
+                format_chunk = chunk[data_start:data_end]
+            elif chunk_id == b"data":
+                data_chunks.append(chunk[data_start:data_end])
+            offset = data_end + (chunk_size % 2)
+
+        if format_chunk is None:
+            raise TtsApiError("WAV audio chunk misses the fmt subchunk")
+        if not data_chunks:
+            raise TtsApiError("WAV audio chunk misses the data subchunk")
+        return format_chunk, data_chunks
 
 
 def utc_timestamp() -> str:
@@ -212,6 +304,7 @@ async def synthesize(args: argparse.Namespace, secret_key: str) -> None:
             connect_options["ssl"] = ssl_context
         async with websockets.connect(ws_url, **connect_options) as websocket:
             with part_path.open("wb") as audio_file:
+                audio_writer = AudioFileWriter(audio_file, args.format)
                 await websocket.send(json.dumps(payload, ensure_ascii=False))
 
                 async for raw_message in websocket:
@@ -231,7 +324,7 @@ async def synthesize(args: argparse.Namespace, secret_key: str) -> None:
                             chunk = base64.b64decode(event.get("audioBase64", ""), validate=True)
                         except (ValueError, TypeError) as exc:
                             raise TtsApiError(f"Invalid audioBase64 in seq={event.get('seq')}") from exc
-                        audio_file.write(chunk)
+                        audio_writer.write(chunk)
                         chunks += 1
                         total_bytes += len(chunk)
                         print(
@@ -249,6 +342,8 @@ async def synthesize(args: argparse.Namespace, secret_key: str) -> None:
                         )
                     else:
                         print(f"Ignored unknown event: {event_type}")
+                if completed:
+                    audio_writer.finalize()
     except Exception:
         if part_path.exists():
             part_path.unlink()
@@ -260,7 +355,10 @@ async def synthesize(args: argparse.Namespace, secret_key: str) -> None:
         raise TtsApiError("WebSocket closed before the done event")
 
     part_path.replace(output_path)
-    print(f"Saved {chunks} chunks ({total_bytes} bytes) to {output_path}")
+    print(
+        f"Saved {chunks} chunks ({total_bytes} received bytes, "
+        f"{output_path.stat().st_size} file bytes) to {output_path}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -280,7 +378,7 @@ def parse_args() -> argparse.Namespace:
     voice_group.add_argument("--voice-audio", help="用于音色克隆的音频 URL")
     parser.add_argument("--emotion", help="情感参数")
     parser.add_argument("--language", default="zh-CN", help="文本语种，默认 zh-CN")
-    parser.add_argument("--format", choices=("pcm", "wav", "mp3", "opus"), default="wav")
+    parser.add_argument("--format", choices=("pcm", "wav", "mp3"), default="wav")
     parser.add_argument("--output", default=None, help="本地输出文件，默认 output.<format>")
     parser.add_argument("--speed", type=float, help="语速倍率，范围 0.5 到 2.0")
     parser.add_argument("--loudness-lufs", type=float, help="目标响度，范围 -30.0 到 -6.0")
